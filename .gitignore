@@ -1,2 +1,16 @@
 # Files(files.zip)
 *.zip
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+*.egg-info/
+dist/
+build/
+venv/
+.DS_Store
+data/raw/*.json
+*.gexf
+test_mining_report.json
+CLAUDE.md

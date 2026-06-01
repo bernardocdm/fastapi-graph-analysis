@@ -153,7 +153,7 @@ O projeto conta com uma infraestrutura robusta, testada e pronta para produção
 Identificamos as seguintes frentes de evolução recomendadas para o projeto:
 
 * [ ] **Pipeline de Integração Contínua (CI):** Implementação de fluxo do GitHub Actions para rodar a suíte `pytest` a cada push ou PR enviado.
-* [ ] **Dashboard Web Interativo:** Criação de um frontend web simples (utilizando templates HTML5 e bibliotecas como *Vis.js* ou *D3.js*) para carregar interativamente o arquivo `collaboration_graph.json` gerado na pasta de outputs, permitindo que o usuário explore a rede de forma visual no navegador.
+* [ ] **Dashboard Web Interativo:** Criação de um frontend web simples para carregar interativamente o arquivo `collaboration_graph.json` gerado na pasta de outputs, permitindo que o usuário explore a rede de forma visual no navegador.
 * [ ] **Análise Temporal da Rede:** Funcionalidade para comparar a evolução estrutural da rede de forma cronológica (ex: analisar fotos do grafo mês a mês para captar o amadurecimento e a mudança na liderança técnica do projeto).
 * [ ] **Suporte a Outras Plataformas:** Extensão do módulo de mineração para coletar dados a partir de logs locais de repositórios Git clássicos ou da API do GitLab.
 * [ ] **Relatório em PDF Computacional (LaTeX):** Redação estruturada e automatização do relatório teórico-prático sobre os resultados das métricas e conclusões obtidas sobre o ecossistema do FastAPI (pasta `relatorio/` a ser criada).

@@ -1,0 +1,73 @@
+@startuml ClassDiagram
+!theme plain
+
+package "src.mining" {
+    abstract class GitHubMiner {
+        # token: str
+        # repo_name: str
+        + mine(limit: int): List[Dict]
+    }
+    
+    class IssueMiner extends GitHubMiner {
+        + mine(limit: int): List[Dict]
+        - parse_comments(): List[Dict]
+        - parse_closures(): List[Dict]
+    }
+    
+    class PRMiner extends GitHubMiner {
+        + mine(limit: int): List[Dict]
+        - parse_reviews(): List[Dict]
+        - parse_merges(): List[Dict]
+    }
+}
+
+package "src.graph" {
+    abstract class AbstractGraph {
+        # _num_vertices: int
+        # _vertex_weights: List[float]
+        + addEdge(u, v): void
+        + removeEdge(u, v): void
+        + hasEdge(u, v): bool
+        + getEdgeWeight(u, v): float
+        + setEdgeWeight(u, v, w): void
+        + getVertexInDegree(u): int
+        + getVertexOutDegree(u): int
+    }
+    
+    class AdjacencyListGraph extends AbstractGraph {
+        - _adjacency_list: Dict
+        - _in_degree: List[int]
+        - _out_degree: List[int]
+    }
+    
+    class AdjacencyMatrixGraph extends AbstractGraph {
+        - _matrix: List[List[float]]
+    }
+}
+
+package "src.analysis" {
+    class CentralityAnalyzer {
+        + degree_centrality(graph): Dict
+        + betweenness_centrality(graph): Dict
+        + closeness_centrality(graph): Dict
+    }
+    
+    class CommunityDetector {
+        + detect_louvain(graph): List[Set]
+        + modularity(graph, communities): float
+    }
+}
+
+package "src.export" {
+    class GEXFExporter {
+        + export_to_gexf(graph, filepath): void
+        + validate_xml(filepath): bool
+    }
+}
+
+GitHubMiner --> "coleta" CentralityAnalyzer: dados
+IssueMiner --> AbstractGraph: arestas
+PRMiner --> AbstractGraph: arestas
+AbstractGraph --> CentralityAnalyzer: grafo
+CentralityAnalyzer --> GEXFExporter: métricas
+@enduml

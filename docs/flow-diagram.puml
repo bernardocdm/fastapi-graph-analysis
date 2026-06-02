@@ -1,0 +1,46 @@
+@startuml FlowDiagram
+!theme plain
+
+actor User
+participant Mining
+participant DataProcessing
+participant Graph
+participant Analysis
+participant Export
+participant Gephi
+
+User -> Mining: python test_mining.py <token>
+activate Mining
+Mining -> Mining: IssueMiner.mine(50)
+Mining -> Mining: PRMiner.mine(50)
+Mining -> Mining: parse_interactions()
+deactivate Mining
+Mining --> DataProcessing: edges.json (200KB)
+
+User -> DataProcessing: carrega edges.json
+activate DataProcessing
+DataProcessing -> Graph: monta 4 grafos
+deactivate DataProcessing
+
+User -> Graph: calcula métricas
+activate Graph
+Graph -> Graph: getVertexInDegree()
+Graph -> Graph: getVertexOutDegree()
+Graph -> Analysis: passa grafo
+deactivate Graph
+
+activate Analysis
+Analysis -> Analysis: degree_centrality()
+Analysis -> Analysis: betweenness_centrality()
+Analysis -> Analysis: detect_louvain()
+deactivate Analysis
+Analysis --> Export: métricas calculadas
+
+activate Export
+Export -> Export: export_to_gexf()
+deactivate Export
+Export --> Gephi: grafo.gexf
+
+User -> Gephi: abre visualização
+Gephi --> User: análise visual
+@enduml

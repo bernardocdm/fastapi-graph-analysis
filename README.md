@@ -165,20 +165,50 @@ Identificamos as seguintes frentes de evolução recomendadas para o projeto:
 
 ```text
 fastapi-graph-analysis/
-├── data/
-│   ├── raw/                # Caches locais da mineração JSON obtida do GitHub API
-│   ├── processed/          # Estado persistido do grafo processado (graph_state.json)
-│   └── outputs/            # Arquivos enriquecidos finais (GEXF, JSON, CSV)
-├── src/
-│   ├── analysis/           # Cálculos de centralidade e detecção de comunidades
-│   ├── export/             # Exportadores para GEXF, JSON e CSV
-│   ├── graph/              # Construtor do grafo direcionado e ponderado
-│   ├── mining/             # Minerador online do GitHub API e gerador de simulação Mock
-│   └── config.py           # Diretórios globais e tokens de acesso
-├── tests/                  # Suíte de testes automatizados com Pytest
-├── main.py                 # Ponto de entrada CLI principal
-├── pytest.ini              # Configuração do framework de testes Pytest
-└── requirements.txt        # Dependências de bibliotecas externas
+│
+├── main.py                   # CLI principal — orquestra o pipeline completo
+├── api_server.py             # Servidor FastAPI para a interface web
+│                             #   GET /api/graph   → grafo com métricas por nó
+│                             #   GET /api/metrics → métricas globais da rede
+├── requirements.txt          # Dependências Python
+├── pytest.ini                # Configuração do pytest
+│
+├── src/                      # Código-fonte do backend
+│   ├── config.py             # Caminhos globais e leitura do GITHUB_TOKEN
+│   ├── mining/
+│   │   └── miner.py          # GitHubMiner: coleta issues/PRs/comentários/reviews + mock data
+│   ├── graph/
+│   │   └── builder.py        # CollaborationGraphBuilder: constrói DiGraph ponderado (NetworkX)
+│   ├── analysis/
+│   │   └── analyzer.py       # Centralidades (5), comunidades Louvain, métricas globais
+│   ├── export/
+│   │   └── exporter.py       # Exporta GEXF (Gephi), JSON (D3.js) e CSV
+│   └── api/
+│       └── routes.py         # [vazio] placeholder para rotas separadas do api_server.py
+│
+├── tests/
+│   ├── test_all.py           # 5 testes unitários (todos passando)
+│   └── fixtures/             # [vazio] futuro: dados fixos para testes
+│
+├── data/                     # Gerado em runtime — não versionado (exceto processed/)
+│   ├── raw/                  # Cache JSON bruto da GitHub API (.gitignore)
+│   ├── processed/
+│   │   └── graph_state.json  # Estado intermediário do grafo (node-link)
+│   └── outputs/
+│       ├── collaboration_graph.json  # Grafo completo com métricas — consumido pela API
+│       ├── collaboration_graph.gexf  # Grafo para visualização no Gephi
+│       └── collaboration_metrics.csv # Tabela com centralidades por contribuidor
+│
+├── frontend/                 # Interface web (em desenvolvimento — React + Vite + Tailwind)
+│   ├── package.json          # [vazio] dependências a instalar
+│   └── src/
+│       └── public/           # [vazio] futuro: index.html e assets
+│
+├── docs/
+│   ├── class-diagram.puml    # Diagrama UML de classes (PlantUML)
+│   └── flow-diagram.puml     # Diagrama de sequência do pipeline
+│
+└── relatorio/                # [vazio] futuro: relatório LaTeX
 ```
 
 ---

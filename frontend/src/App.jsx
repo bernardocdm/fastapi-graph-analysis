@@ -1,17 +1,16 @@
 import { useGraphData } from './hooks/useGraphData';
-import { GraphViewer } from './components/GraphViewer';
-import { StatsPanel } from './components/StatsPanel';
+import { DashboardMetrics } from './components/DashboardMetrics';
 import './index.css';
 
 function App() {
-    const { graphData, metrics, loading, error } = useGraphData();
+    const { contributors, metrics, loading, error } = useGraphData();
 
     if (loading) {
         return (
             <div className="flex items-center justify-center h-screen bg-gray-100">
                 <div className="text-center">
                     <div className="animate-spin text-4xl mb-4">⏳</div>
-                    <p className="text-gray-600">Carregando grafo...</p>
+                    <p className="text-gray-600">Carregando análise...</p>
                 </div>
             </div>
         );
@@ -21,7 +20,7 @@ function App() {
         return (
             <div className="flex items-center justify-center h-screen bg-red-50">
                 <div className="text-center">
-                    <p className="text-red-600 font-bold">❌ Erro</p>
+                    <p className="text-red-600 font-bold">❌ Erro ao carregar   </p>
                     <p className="text-red-500 mb-4">{error}</p>
                     <div className="text-sm text-gray-600 bg-white p-4 rounded">
                         <p className="font-bold mb-2">Checklist:</p>
@@ -37,19 +36,28 @@ function App() {
     }
 
     return (
-        <div className="flex h-screen bg-gray-100">
-            <aside className="w-96 bg-white shadow-lg p-6 overflow-y-auto border-r border-gray-200">
-                <div className="mb-8">
-                    <h1 className="text-3xl font-bold text-gray-800">FastAPI</h1>
-                    <p className="text-sm text-gray-500">Collaboration Graph</p>
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+            <header className="bg-white shadow">
+                <div className="max-w-7xl mx-auto px-6 py-8">
+                    <h1 className="text-4xl font-bold text-gray-900">FastAPI Graph Analysis</h1>
+                    <p className="text-gray-600 mt-2">Dashboard de análise de colaboração no FastAPI</p>
                 </div>
-                
-                {metrics && <StatsPanel metrics={metrics} />}
-            </aside>
+            </header>
 
-            <main className="flex-1">
-                {graphData && <GraphViewer data={graphData} />}
+            <main className="max-w-7xl mx-auto px-6 py-12">
+                {metrics && contributors && (
+                    <DashboardMetrics 
+                        metrics={metrics} 
+                        contributors={contributors} 
+                    />
+                )}
             </main>
+
+            <footer className="bg-white border-t border-gray-200 mt-12">
+                <div className="max-w-7xl mx-auto px-6 py-6 text-center text-gray-600 text-sm">
+                    <p>Visualize o grafo interativo em <strong>Gephi</strong> usando os arquivos em <code>data/outputs/collaboration_graph.gexf</code></p>
+                </div>
+            </footer>
         </div>
     );
 }

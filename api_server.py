@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import networkx as nx
 
 # Path absoluto relativo ao arquivo — funciona independente de onde o script é chamado
 DATA_DIR = Path(__file__).parent / "data/outputs"
@@ -46,44 +45,111 @@ def get_metrics():
             status_code=404,
             detail="Execute primeiro: python main.py --use-mock"
         )
-    
+
     with open(file_path, "r", encoding="utf-8") as f:
         graph_data = json.load(f)
-    
-    # Reconstruir grafo NetworkX a partir do JSON
-    G = nx.node_link_graph(graph_data, directed=True)
-    
-    # Calcular métricas
-    num_nodes = G.number_of_nodes()
-    num_edges = G.number_of_edges()
-    density = nx.density(G)
-    
-    # Componentes conexas
-    if G.is_directed():
-        weak_components = nx.number_weakly_connected_components(G)
-        strong_components = nx.number_strongly_connected_components(G)
-    else:
-        weak_components = nx.number_connected_components(G)
-        strong_components = 0
-    
-    # Diâmetro (apenas se grafo é conexo)
-    try:
-        if G.is_directed():
-            undirected = G.to_undirected()
-            diameter = nx.diameter(undirected)
-        else:
-            diameter = nx.diameter(G)
-    except:
-        diameter = None
-    
-    # Reciprocidade
-    reciprocity = nx.reciprocity(G) if G.is_directed() else 0
-    
+
+    nodes = [n["id"] for n in graph_data["nodes"]]
+    links = graph_data["links"]
+    num_nodes = len(nodes)
+    num_edges = len(links)
+
+    # Índice de adjacência: node_id -> conjunto de vizinhos (saída)
+    adj_out = {n: set() for n in nodes}
+    adj_in  = {n: set() for n in nodes}
+    for link in links:
+        s, t = link["source"], link["target"]
+        if s in adj_out and t in adj_out:
+            adj_out[s].add(t)
+            adj_in[t].add(s)
+
+    # Densidade: E / (V * (V-1))
+    max_edges = num_nodes * (num_nodes - 1)
+    density = round(num_edges / max_edges, 4) if max_edges > 0 else 0.0
+
+    # Reciprocidade: fração de arestas que têm aresta reversa
+    reciprocal = sum(1 for s in adj_out for t in adj_out[s] if s in adj_out.get(t, set()))
+    reciprocity = round(reciprocal / num_edges, 4) if num_edges > 0 else 0.0
+
+    # Componentes fracamente conexos: BFS ignorando direção
+    def weakly_connected_components(nodes, adj_out, adj_in):
+        visited = set()
+        count = 0
+        for start in nodes:
+            if start not in visited:
+                count += 1
+                queue = [start]
+                while queue:
+                    node = queue.pop()
+                    if node in visited:
+                        continue
+                    visited.add(node)
+                    queue.extend(adj_out[node] - visited)
+                    queue.extend(adj_in[node] - visited)
+        return count
+
+    # Componentes fortemente conexos: algoritmo de Kosaraju
+    def strongly_connected_components(nodes, adj_out, adj_in):
+        visited = set()
+        finish_order = []
+
+        def dfs_forward(v):
+            stack = [(v, False)]
+            while stack:
+                node, returning = stack.pop()
+                if returning:
+                    finish_order.append(node)
+                    continue
+                if node in visited:
+                    continue
+                visited.add(node)
+                stack.append((node, True))
+                for neighbor in adj_out[node]:
+                    if neighbor not in visited:
+                        stack.append((neighbor, False))
+
+        for n in nodes:
+            if n not in visited:
+                dfs_forward(n)
+
+        visited2 = set()
+        count = 0
+        for v in reversed(finish_order):
+            if v not in visited2:
+                count += 1
+                stack = [v]
+                while stack:
+                    node = stack.pop()
+                    if node in visited2:
+                        continue
+                    visited2.add(node)
+                    stack.extend(adj_in[node] - visited2)
+        return count
+
+    # Diâmetro: BFS a partir de cada nó no grafo não-direcionado
+    def bfs_max_distance(start, adj_out, adj_in):
+        dist = {start: 0}
+        queue = [start]
+        while queue:
+            node = queue.pop(0)
+            for neighbor in adj_out[node] | adj_in[node]:
+                if neighbor not in dist:
+                    dist[neighbor] = dist[node] + 1
+                    queue.append(neighbor)
+        return max(dist.values()) if len(dist) > 1 else 0
+
+    weak_components   = weakly_connected_components(nodes, adj_out, adj_in)
+    strong_components = strongly_connected_components(nodes, adj_out, adj_in)
+
+    diameter = None
+    if weak_components == 1:
+        diameter = max(bfs_max_distance(n, adj_out, adj_in) for n in nodes)
+
     return {
         "num_nodes": num_nodes,
         "num_edges": num_edges,
-        "density": round(density, 4),
-        "reciprocity": round(reciprocity, 4),
+        "density": density,
+        "reciprocity": reciprocity,
         "diameter": diameter,
         "weakly_connected_components": weak_components,
         "strongly_connected_components": strong_components,

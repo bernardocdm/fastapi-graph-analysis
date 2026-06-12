@@ -85,6 +85,7 @@ def test_relations(graph_class):
     assert g.isIncident(0, 1, 2) == False
 
 def test_complete_graph(graph_class):
+    """Testa grafo completo."""
     g = graph_class(3)
     g.addEdge(0, 1)
     g.addEdge(0, 2)
@@ -95,3 +96,75 @@ def test_complete_graph(graph_class):
     
     assert g.isCompleteGraph() == True
     assert g.isConnected() == True
+
+
+# ==========================================
+# TESTES - EDGE CASES
+# ==========================================
+
+def test_disconnected_graph(graph_class):
+    """Testa isConnected() quando grafo tem componentes desconexos"""
+    g = graph_class(4)
+    # componentes 
+    g.addEdge(0,1)
+    g.addEdge(2,3)
+
+    assert g.isConnected() == False
+
+def test_vertex_labels(graph_class):
+    """Testa set/get de labels dos vértices."""
+    g = graph_class(3)
+    g.setVertexLabel(0, "Alice")
+    g.setVertexLabel(1, "Bob")
+    g.setVertexLabel(2, "Charlie")
+    
+    assert g.getVertexLabel(0) == "Alice"
+    assert g.getVertexLabel(1) == "Bob"
+    assert g.getVertexLabel(2) == "Charlie"
+
+
+def test_remove_nonexistent_edge(graph_class):
+    """Testa remoção de aresta que nunca foi adicionada."""
+    g = graph_class(3)
+    
+    # Não lança erro
+    g.removeEdge(0, 1)
+    assert g.getEdgeCount() == 0
+
+
+def test_large_complete_graph(graph_class):
+    """Testa comportamento com grafo completo maior."""
+    g = graph_class(10)
+    
+    # Adiciona as arestas possíveis
+    for i in range(10):
+        for j in range(10):
+            if i != j:
+                g.addEdge(i, j)
+    
+    # N=10, E = 10*9 = 90
+    assert g.getEdgeCount() == 90
+    assert g.isCompleteGraph() == True
+    assert g.isConnected() == True
+
+
+def test_edge_weight_default(graph_class):
+    """Testa peso padrão de aresta recém adicionada."""
+    g = graph_class(2)
+    g.addEdge(0, 1)
+    
+    weight = g.getEdgeWeight(0, 1)
+    assert isinstance(weight, (int, float))
+    assert weight >= 0
+
+
+def test_isolated_vertex(graph_class):
+    """Testa vértice isolado (sem arestas)."""
+    g = graph_class(3)
+    g.addEdge(0, 1)
+    
+    # Vértice 2 está isolado
+    assert g.getVertexInDegree(2) == 0
+    assert g.getVertexOutDegree(2) == 0
+    assert g.isConnected() == False    
+

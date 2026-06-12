@@ -14,3 +14,4 @@ data/raw/*.json
 *.gexf
 test_mining_report.json
 CLAUDE.md
+.env

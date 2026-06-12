@@ -41,7 +41,7 @@ def export_to_json(graph: AbstractGraph, filepath=None, centralities=None, commu
             node_data.update(c)
             
         if communities and label in communities:
-            node_data["group"] = communities[label]
+            node_data["community"] = communities[label]
             
         data["nodes"].append(node_data)
         
@@ -62,9 +62,16 @@ def export_to_json(graph: AbstractGraph, filepath=None, centralities=None, commu
 
 def export_metrics_to_csv(centralities, communities, graph: AbstractGraph, filepath=None):
     """
-    Exporta a tabela comparativa de métricas em formato CSV.
+    Exporta a tabela comparativa de métricas em formato CSV ordenada por PageRank (decrescente).
     """
     path = filepath or OUTPUT_DATA_DIR / "collaboration_metrics.csv"
+
+    # pra ordenar por pageRank (Big first)
+    sorted_users = sorted(
+        centralities.keys(),
+        key=lambda u: centralities[u].get("pagerank", 0),
+        reverse=True
+    )
     
     headers = [
         "Username", 
@@ -83,9 +90,9 @@ def export_metrics_to_csv(centralities, communities, graph: AbstractGraph, filep
         writer = csv.writer(f)
         writer.writerow(headers)
         
-        for i in range(num_vertices):
-            username = graph.getVertexLabel(i)
-            contributions = graph.getVertexWeight(i)
+        for username in sorted_users:
+            uid = next(i for i in range(num_vertices) if graph.getVertexLabel(i) == username)
+            contributions = graph.getVertexWeight(uid)
             
             c_data = centralities.get(username, {})
             in_deg = c_data.get("in_degree", 0.0)

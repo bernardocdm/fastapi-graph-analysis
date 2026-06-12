@@ -66,6 +66,11 @@ def export_metrics_to_csv(centralities, communities, graph: AbstractGraph, filep
     """
     path = filepath or OUTPUT_DATA_DIR / "collaboration_metrics.csv"
 
+    username_to_id = {
+        graph.getVertexLabel(i): i 
+        for i in range(graph.getVertexCount())
+    }
+
     # pra ordenar por pageRank (Big first)
     sorted_users = sorted(
         centralities.keys(),
@@ -91,7 +96,7 @@ def export_metrics_to_csv(centralities, communities, graph: AbstractGraph, filep
         writer.writerow(headers)
         
         for username in sorted_users:
-            uid = next(i for i in range(num_vertices) if graph.getVertexLabel(i) == username)
+            uid = username_to_id[username] # aumenta velocidade
             contributions = graph.getVertexWeight(uid)
             
             c_data = centralities.get(username, {})

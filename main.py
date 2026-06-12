@@ -1,176 +1,200 @@
 import argparse
 import sys
-from pathlib import Path
-from src.config import init_directories, DEFAULT_REPO
+from src.config import init_directories, DEFAULT_REPO, GITHUB_TOKENS, OUTPUT_DATA_DIR
 from src.mining.miner import GitHubMiner
 from src.graph.builder import CollaborationGraphBuilder
 from src.analysis import analyzer
 from src.export import exporter
+
 
 def print_header(title):
     print("\n" + "=" * 80)
     print(f" {title:^78} ")
     print("=" * 80)
 
+
 def print_table(rows, headers):
-    # Calcular largura de cada coluna
     widths = [len(h) for h in headers]
     for row in rows:
         for idx, cell in enumerate(row):
             widths[idx] = max(widths[idx], len(str(cell)))
-            
-    # Criar string de formato
+
     row_fmt = " | ".join([f"{{:<{w}}}" for w in widths])
-    sep = "-+-".join(["-" * w for w in widths])
-    
+    sep     = "-+-".join(["-" * w for w in widths])
+
     print("\n" + row_fmt.format(*headers))
     print(sep)
     for row in rows:
         print(row_fmt.format(*[str(c) for c in row]))
     print()
 
+
 def main():
     parser = argparse.ArgumentParser(
-        description="FastAPI Graph Analysis - Analise a colaboração dos desenvolvedores no ecossistema FastAPI."
+        description="Graph Analysis — Análise de colaboração em repositórios GitHub via Teoria de Grafos."
     )
-    parser.add_argument("--mine", action="store_true", help="Executar mineração ativa no GitHub.")
-    parser.add_argument("--use-mock", action="store_true", help="Forçar o uso de simulação offline (dados sintéticos).")
-    parser.add_argument("--limit", type=int, default=50, help="Limite de issues/PRs a processar na mineração (padrão: 50).")
-    parser.add_argument("--include-bots", action="store_true", help="Incluir bots de automação (como dependabot) na análise.")
-    parser.add_argument("--force-refresh", action="store_true", help="Ignorar o cache local e forçar atualização via API.")
-    parser.add_argument("--repo", type=str, default=DEFAULT_REPO, help=f"Repositório GitHub (padrão: {DEFAULT_REPO}).")
-    
+    parser.add_argument("--mine",          action="store_true",
+                        help="Executar mineração ativa no GitHub.")
+    parser.add_argument("--use-mock",      action="store_true",
+                        help="Usar dados sintéticos (offline).")
+    parser.add_argument("--limit",         type=int, default=200,
+                        help="Limite de issues/PRs a processar (padrão: 200). Use 0 para sem limite.")
+    parser.add_argument("--include-bots",  action="store_true",
+                        help="Incluir bots na análise.")
+    parser.add_argument("--force-refresh", action="store_true",
+                        help="Ignorar cache e reminerar do zero.")
+    parser.add_argument("--repo",          type=str, default=DEFAULT_REPO,
+                        help=f"Repositório GitHub (padrão: {DEFAULT_REPO}).")
+
     args = parser.parse_args()
-    
-    # Inicializar diretórios
     init_directories()
-    
-    print_header("FASTAPI GRAPH ANALYSIS - INICIALIZANDO PIPELINE")
-    
-    miner = GitHubMiner(repo_name=args.repo)
+
+    print_header("GRAPH ANALYSIS — INICIALIZANDO PIPELINE")
+
+    # ── 1. Mineração ──────────────────────────────────────────────────────────
+    miner      = GitHubMiner(tokens=GITHUB_TOKENS, repo_name=args.repo)
     mined_data = None
-    
-    # Verificar se devemos usar mock ou tentar mineração/cache
+
     if args.use_mock:
         mined_data = miner.generate_mock_data()
+
     else:
-        # Tentar ler cache ou fazer mineração
         cache_exists = miner.cache_file.exists()
-        
+
         if not cache_exists and not args.mine:
             print("[WARN] Nenhum cache local encontrado e --mine não foi especificado.")
-            print("[INFO] Alternando automaticamente para o modo simulação (Mock) para fins demonstrativos.")
+            print("[INFO] Alternando para modo mock para demonstração.")
             mined_data = miner.generate_mock_data()
+
         else:
-            # Tentar minerar ou carregar cache
             try:
-                # Se forçando ou não possuindo cache, realiza a mineração
-                if args.force_refresh or not cache_exists:
-                    mined_data = miner.mine(limit=args.limit, force_refresh=True)
-                else:
-                    mined_data = miner.mine(limit=args.limit, force_refresh=False)
+                force      = args.force_refresh or not cache_exists
+                mined_data = miner.mine(limit=args.limit, force_refresh=force)
+
             except Exception as e:
-                print(f"[ERROR] Não foi possível obter dados ativos: {e}")
-                print("[INFO] Realizando fallback automático para dados simulados (Mock).")
-                mined_data = miner.generate_mock_data()
+                print(f"[ERROR] Mineração interrompida: {e}")
+
+                # Tentar usar checkpoint parcial salvo durante a mineração
+                if miner.cache_file.exists():
+                    print("[INFO] Usando checkpoint parcial salvo durante a mineração.")
+                    mined_data = miner.load_cache()
+                    issues_count = len(mined_data.get("issues", []))
+                    prs_count    = len(mined_data.get("prs",    []))
+                    print(f"[INFO] Checkpoint contém {issues_count} issues e {prs_count} PRs reais.")
+                else:
+                    print("[INFO] Nenhum checkpoint disponível. Usando dados mock.")
+                    mined_data = miner.generate_mock_data()
 
     if not mined_data:
-        print("[ERROR] Erro crítico: Sem dados para processamento. Encerrando.")
+        print("[ERROR] Sem dados para processamento. Encerrando.")
         sys.exit(1)
-        
-    # 2. Construir Grafo
-    print_header("1. CONSTRUÇÃO DO GRAFO DE COLABORAÇÃO")
-    exclude_bots = not args.include_bots
-    builder = CollaborationGraphBuilder(exclude_bots=exclude_bots)
-    graph = builder.build_from_mined_data(mined_data)
-    
+
+    is_mock       = mined_data.get("is_mock",       False)
+    is_checkpoint = mined_data.get("is_checkpoint", False)
+
+    print(f"\n[INFO] Issues: {len(mined_data.get('issues', []))}")
+    print(f"[INFO] PRs:    {len(mined_data.get('prs',    []))}")
+    if is_mock:
+        print("[INFO] Fonte: dados sintéticos (mock)")
+    elif is_checkpoint:
+        print("[INFO] Fonte: checkpoint parcial (mineração incompleta)")
+    else:
+        print("[INFO] Fonte: mineração completa")
+
+    # ── 2. Construção dos 4 grafos ────────────────────────────────────────────
+    print_header("1. CONSTRUÇÃO DOS GRAFOS DE COLABORAÇÃO")
+
+    builder = CollaborationGraphBuilder(exclude_bots=not args.include_bots)
+    graph   = builder.build_from_mined_data(mined_data)
+
     if graph.getVertexCount() == 0:
-        print("[WARN] Grafo vazio! Nenhum colaborador encontrado com os filtros atuais.")
+        print("[WARN] Grafo vazio. Verifique os dados minerados.")
         sys.exit(0)
-        
-    # Salvar estado do grafo
+
     builder.save_graph_state()
-    
-    # 3. Analisar Grafo
-    print_header("2. ANÁLISE E CÁLCULO DE MÉTRICAS DA REDE")
-    
+
+    # ── 3. Análise ────────────────────────────────────────────────────────────
+    print_header("2. ANÁLISE E CÁLCULO DE MÉTRICAS")
+
     print("[INFO] Calculando centralidades (Degree, Betweenness, Closeness, PageRank)...")
     centralities = analyzer.calculate_centralities(graph)
-    
-    print("[INFO] Detectando comunidades de colaboradores (Louvain)...")
-    communities = analyzer.detect_communities(graph)
-    
-    print("[INFO] Compilando estatísticas globais da rede...")
-    global_metrics = analyzer.get_network_metrics(graph)
-    
-    # Mostrar estatísticas globais
-    print("\n--- Estatísticas Globais da Rede ---")
-    print(f"  Número de Contribuintes (Nós): {global_metrics['nodes']}")
-    print(f"  Número de Interações (Arestas): {global_metrics['edges']}")
-    print(f"  Densidade do Grafo: {global_metrics['density']:.4f}")
-    print(f"  Reciprocidade (Mútua): {global_metrics['reciprocity']:.4f}")
-    print(f"  Agrupamento Médio (Clustering): {global_metrics['average_clustering']:.4f}")
-    print(f"  Diâmetro da Rede: {global_metrics['diameter']}")
-    print(f"  Componentes Conectados (Fraco): {global_metrics['weakly_connected_components']}")
-    print(f"  Componentes Conectados (Forte): {global_metrics['strongly_connected_components']}")
 
-    # 4. Mostrar os Top 10 Contribuidores mais influentes (PageRank)
+    print("[INFO] Detectando comunidades (Label Propagation)...")
+    communities  = analyzer.detect_communities(graph)
+
+    print("[INFO] Calculando métricas globais da rede...")
+    global_metrics = analyzer.get_network_metrics(graph)
+
+    print("\n--- Métricas Globais da Rede ---")
+    print(f"  Contribuidores (nós):              {global_metrics['nodes']}")
+    print(f"  Interações (arestas):              {global_metrics['edges']}")
+    print(f"  Densidade:                         {global_metrics['density']:.4f}")
+    print(f"  Reciprocidade:                     {global_metrics['reciprocity']:.4f}")
+    print(f"  Clustering médio:                  {global_metrics['average_clustering']:.4f}")
+    print(f"  Assortatividade:                   {global_metrics['assortativity']:.4f}")
+    print(f"  Diâmetro:                          {global_metrics['diameter']:.0f}")
+    print(f"  Componentes fracos:                {global_metrics['weakly_connected_components']}")
+    print(f"  Componentes fortes (Kosaraju):     {global_metrics['strongly_connected_components']}")
+
+    # ── 4. Top 10 por PageRank ────────────────────────────────────────────────
     print_header("3. TOP 10 COLABORADORES MAIS INFLUENTES (PAGERANK)")
-    
-    # Obter todos os usuários
+
     all_users = [graph.getVertexLabel(i) for i in range(graph.getVertexCount())]
-    
-    # Ordenar nós por PageRank
     top_contributors = sorted(
         all_users,
-        key=lambda user: centralities.get(user, {}).get("pagerank", 0.0),
+        key=lambda u: centralities.get(u, {}).get("pagerank", 0.0),
         reverse=True
     )[:10]
-    
-    headers = ["Username", "Contrib.", "In-Degree", "Out-Degree", "Betweenness", "PageRank", "Community"]
+
+    headers = ["Username", "Contrib.", "In-Deg", "Out-Deg",
+               "Betweenness", "Closeness", "PageRank", "Comunidade"]
     rows = []
-    
-    # Precisamos do id do nó para buscar as contribuições (VertexWeight)
     for user in top_contributors:
-        # Encontrar id do user
-        node_id = -1
-        for i in range(graph.getVertexCount()):
-            if graph.getVertexLabel(i) == user:
-                node_id = i
-                break
-                
-        contributions = graph.getVertexWeight(node_id) if node_id != -1 else 0
-        metrics = centralities.get(user, {})
-        comm = communities.get(user, 0)
-        
+        node_id = next(
+            (i for i in range(graph.getVertexCount()) if graph.getVertexLabel(i) == user), -1
+        )
+        contribs = graph.getVertexWeight(node_id) if node_id != -1 else 0
+        m = centralities.get(user, {})
         rows.append([
             user,
-            contributions,
-            f"{metrics.get('in_degree', 0.0):.4f}",
-            f"{metrics.get('out_degree', 0.0):.4f}",
-            f"{metrics.get('betweenness', 0.0):.4f}",
-            f"{metrics.get('pagerank', 0.0):.4f}",
-            comm
+            int(contribs),
+            f"{m.get('in_degree',   0.0):.4f}",
+            f"{m.get('out_degree',  0.0):.4f}",
+            f"{m.get('betweenness', 0.0):.4f}",
+            f"{m.get('closeness',   0.0):.4f}",
+            f"{m.get('pagerank',    0.0):.4f}",
+            communities.get(user, 0)
         ])
-        
     print_table(rows, headers)
-    
-    # 5. Exportar Resultados
+
+    # ── 5. Exportação ─────────────────────────────────────────────────────────
     print_header("4. EXPORTAÇÃO DOS ARQUIVOS DE SAÍDA")
-    
-    # Exportar GEXF (para Gephi)
-    gexf_path = exporter.export_to_gexf(graph, centralities=centralities, communities=communities)
-    
-    # Exportar JSON (para visualização web)
-    json_path = exporter.export_to_json(graph, centralities=centralities, communities=communities)
-    
-    # Exportar CSV (tabela de métricas)
+
+    all_graphs = builder.get_all_graphs()
+
+    # Exportar os 4 grafos em GEXF separados (para Gephi)
+    for name, g in all_graphs.items():
+        if g and g.getVertexCount() > 0:
+            filepath = OUTPUT_DATA_DIR / f"graph_{name}.gexf"
+            path = exporter.export_to_gexf(
+                g,
+                filepath=filepath,
+                centralities=(centralities if name == "integrated" else None),
+                communities=(communities  if name == "integrated" else None)
+            )
+            print(f"  [GEXF] {name}: {path}")
+
+    # JSON e CSV do grafo integrado
+    json_path = exporter.export_to_json(
+        graph, centralities=centralities, communities=communities
+    )
     csv_path = exporter.export_metrics_to_csv(centralities, communities, graph)
-    
+
+    print(f"\n  [JSON] {json_path}")
+    print(f"  [CSV]  {csv_path}")
     print("\n[SUCCESS] Pipeline concluído com sucesso!")
-    print(f"  Arquivo Gephi (GEXF): {gexf_path}")
-    print(f"  Arquivo JSON: {json_path}")
-    print(f"  Tabela de Métricas (CSV): {csv_path}\n")
+
 
 if __name__ == "__main__":
     main()
+    

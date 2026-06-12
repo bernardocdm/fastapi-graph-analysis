@@ -4,30 +4,44 @@ from pathlib import Path
 # Caminho base do projeto
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Carregar arquivo .env manualmente se existir para evitar dependência externa
+# Carregar arquivo .env manualmente (sem dependência de python-dotenv)
 env_path = BASE_DIR / ".env"
 if env_path.exists():
-    with open(env_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, val = line.split("=", 1)
-                os.environ[key.strip()] = val.strip().strip('"').strip("'")
+    with open(env_path, "r", encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _val = _line.split("=", 1)
+                os.environ.setdefault(_key.strip(), _val.strip().strip('"').strip("'"))
 
 # Diretórios de dados
-DATA_DIR = BASE_DIR / "data"
-RAW_DATA_DIR = DATA_DIR / "raw"
+DATA_DIR           = BASE_DIR / "data"
+RAW_DATA_DIR       = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
-OUTPUT_DATA_DIR = DATA_DIR / "outputs"
+OUTPUT_DATA_DIR    = DATA_DIR / "outputs"
 
-# Configurações do GitHub
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_TOKENS_RAW = os.getenv("GITHUB_TOKENS", "")
-if GITHUB_TOKENS_RAW:
-    GITHUB_TOKENS = [t.strip() for t in GITHUB_TOKENS_RAW.split(",") if t.strip()]
+_tokens_csv = os.getenv("GITHUB_TOKENS", "")
+if _tokens_csv:
+    GITHUB_TOKENS = [t.strip() for t in _tokens_csv.split(",") if t.strip()]
 else:
-    GITHUB_TOKENS = [GITHUB_TOKEN] if GITHUB_TOKEN else []
-DEFAULT_REPO = "encode/fastapi"
+    GITHUB_TOKENS = [
+        t for t in [
+            os.getenv("GITHUB_TOKEN_1", ""),
+            os.getenv("GITHUB_TOKEN_2", ""),
+            os.getenv("GITHUB_TOKEN_3", ""),
+            os.getenv("GITHUB_TOKEN",   ""),   # fallback legado
+        ] if t
+    ]
+    # Remove duplicatas mantendo a ordem
+    seen = set()
+    GITHUB_TOKENS = [t for t in GITHUB_TOKENS if not (t in seen or seen.add(t))]
+
+# Mantido por compatibilidade com código que ainda importe GITHUB_TOKEN diretamente
+GITHUB_TOKEN = GITHUB_TOKENS[0] if GITHUB_TOKENS else ""
+
+# Repositório padrão
+DEFAULT_REPO = "makeplane/plane"
+
 
 def init_directories():
     """Garante que todas as pastas de dados necessárias existam no disco."""

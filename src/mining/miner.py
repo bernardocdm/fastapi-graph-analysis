@@ -1,279 +1,393 @@
 import json
-import os
-import random
-from datetime import datetime, timedelta
-from github import Github, GithubException
-from src.config import RAW_DATA_DIR, GITHUB_TOKEN, GITHUB_TOKENS, DEFAULT_REPO
+import time
+from datetime import datetime
+from github import Github, GithubException, RateLimitExceededException
+from src.config import RAW_DATA_DIR, GITHUB_TOKENS, DEFAULT_REPO
+
 
 class GitHubMiner:
-    """Responsável por coletar dados do repositório GitHub e gerenciar o cache local."""
+    """
+    Responsável por coletar dados do repositório GitHub e gerenciar o cache local.
+    Utiliza rotação automática de tokens: ao atingir rate limit em um token,
+    troca para o próximo sem perder o item que estava sendo processado.
+    Salva checkpoints a cada 100 itens para não perder progresso em caso de erro.
+    """
+
+    CHECKPOINT_INTERVAL = 100  # salvar cache a cada N itens processados
 
     def __init__(self, tokens=None, repo_name=DEFAULT_REPO):
         self.tokens = tokens or GITHUB_TOKENS
         self.repo_name = repo_name
         self.cache_file = RAW_DATA_DIR / f"{self.repo_name.replace('/', '_')}_data.json"
-        
-        self.clients = []
-        if self.tokens:
-            print(f"[INFO] Autenticado com {len(self.tokens)} token(s) do GitHub para rotação/divisão de carga.")
-            for t in self.tokens:
-                self.clients.append(Github(t))
+        self._token_index = 0
+
+        if not self.tokens:
+            print("[WARN] Nenhum token do GitHub fornecido. Rate limit: 60 req/hora (anônimo).")
+            self.tokens = [""]
+
+        self.g = self._make_client()
+        valid = len([t for t in self.tokens if t])
+        print(f"[INFO] {valid} token(s) configurado(s) para rotação automática.")
+
+    # ── Gerenciamento de tokens ───────────────────────────────────────────────
+
+    def _make_client(self):
+        token = self.tokens[self._token_index]
+        return Github(token) if token else Github()
+
+    def _rotate_token(self):
+        """Avança circularmente para o próximo token e recria o cliente."""
+        previous = self._token_index
+        self._token_index = (self._token_index + 1) % len(self.tokens)
+        if self._token_index == previous:
+            print("[WARN] Apenas 1 token configurado. Aguardando 60s para o rate limit resetar...")
+            time.sleep(60)
         else:
-            print("[WARN] Nenhum token do GitHub fornecido. Limites da API serão limitados (60 req/hora).")
-            self.clients.append(Github())
-            
-        self.g = self.clients[0]
+            print(f"[INFO] Rotacionando: token #{previous + 1} → token #{self._token_index + 1}.")
+        self.g = self._make_client()
+
+    def _call_api(self, fn):
+        """
+        Executa fn() com retry automático ao detectar RateLimitExceeded ou 403.
+        Tenta todos os tokens antes de desistir.
+        Garante que NENHUM item é perdido por esgotamento de rate limit.
+        """
+        max_attempts = len(self.tokens) * 3
+        attempts = 0
+        while attempts < max_attempts:
+            try:
+                return fn()
+            except RateLimitExceededException:
+                try:
+                    rl = self.g.get_rate_limit().core
+                    print(f"[WARN] Rate limit no token #{self._token_index + 1} "
+                          f"(reset em {rl.reset.strftime('%H:%M:%S')} UTC). Rotacionando...")
+                except Exception:
+                    print(f"[WARN] Rate limit no token #{self._token_index + 1}. Rotacionando...")
+                self._rotate_token()
+                attempts += 1
+            except GithubException as ge:
+                if ge.status == 403:
+                    print(f"[WARN] 403 Forbidden no token #{self._token_index + 1}. Rotacionando...")
+                    self._rotate_token()
+                    attempts += 1
+                else:
+                    raise
+        raise RuntimeError(
+            f"[ERROR] Todos os {len(self.tokens)} token(s) esgotaram o rate limit. "
+            "Aguarde o reset ou adicione tokens de outras contas GitHub."
+        )
+
+    def _check_rate_limit(self):
+        """Exibe e retorna o número de requisições restantes no token ativo."""
+        try:
+            rl = self._call_api(lambda: self.g.get_rate_limit().core)
+            print(f"  [RATE LIMIT] Token #{self._token_index + 1}: "
+                  f"{rl.remaining}/{rl.limit} req restantes "
+                  f"(reset {rl.reset.strftime('%H:%M:%S')} UTC)")
+            return rl.remaining
+        except Exception:
+            return 9999
+
+    # ── Checkpoint ────────────────────────────────────────────────────────────
+
+    def _save_checkpoint(self, issues_data, prs_data):
+        """
+        Salva o progresso atual em disco.
+        Chamado a cada CHECKPOINT_INTERVAL itens para garantir que o progresso
+        não seja perdido em caso de rate limit total ou interrupção.
+        """
+        checkpoint = {
+            "repository": self.repo_name,
+            "mined_at": datetime.now().isoformat(),
+            "issues": issues_data,
+            "prs": prs_data,
+            "is_checkpoint": True
+        }
+        with open(self.cache_file, "w", encoding="utf-8") as f:
+            json.dump(checkpoint, f, indent=2, ensure_ascii=False)
+        print(f"  [CHECKPOINT] Progresso salvo: {len(issues_data)} issues, {len(prs_data)} PRs.")
+
+    # ── Mineração principal ───────────────────────────────────────────────────
 
     def mine(self, limit=30, force_refresh=False):
         """
-        Executa a mineração de dados utilizando múltiplos tokens se disponíveis.
-        Divide o limite total de issues entre os tokens configurados.
+        Minera issues e PRs do repositório com rotação automática de tokens
+        e salvamento progressivo de checkpoints.
+
+        Coleta por item:
+          - Issues: author, comments, closed_by
+          - PRs:    author, comments, reviews, merged_by, merged
+
+        Args:
+            limit:         Número máximo de issues/PRs (0 = sem limite).
+            force_refresh: Ignora cache existente e reinicia a mineração.
         """
         if not force_refresh and self.cache_file.exists():
-            print(f"[INFO] Carregando dados minerados do cache local: {self.cache_file.name}")
-            return self.load_cache()
+            print(f"[INFO] Carregando dados do cache: {self.cache_file.name}")
+            data = self.load_cache()
+            is_checkpoint = data.get("is_checkpoint", False)
+            if is_checkpoint:
+                issues_count = len(data.get("issues", []))
+                prs_count    = len(data.get("prs", []))
+                print(f"[INFO] Cache é um checkpoint parcial: "
+                      f"{issues_count} issues e {prs_count} PRs salvos até agora.")
+                print("[INFO] Use --force-refresh para recomeçar do zero.")
+            return data
 
-        limit_desc = f"{limit} itens" if limit > 0 else "sem limite (todos)"
-        print(f"[INFO] Iniciando mineração ativa do repositório {self.repo_name} (Limite: {limit_desc})...")
-        
+        limit_desc = f"{limit} itens" if limit > 0 else "todos os itens (sem limite)"
+        print(f"[INFO] Iniciando mineração de '{self.repo_name}' ({limit_desc})...")
+
+        self._check_rate_limit()
+
         try:
-            # Tenta checar o total de issues usando o primeiro cliente
-            repo = self.g.get_repo(self.repo_name)
-            issues_query = repo.get_issues(state="all")
+            repo          = self._call_api(lambda: self.g.get_repo(self.repo_name))
+            issues_query  = self._call_api(lambda: repo.get_issues(state="all"))
+
             try:
                 total_issues = issues_query.totalCount
-                print(f"[INFO] Total de Issues/PRs no repositório: {total_issues}")
+                print(f"[INFO] Total de itens no repositório: {total_issues}")
             except Exception:
-                total_issues = 2000  # Fallback se não conseguir ler
+                total_issues = None
+                print("[INFO] Não foi possível obter o total. Prosseguindo sem contagem.")
 
-            if limit > 0:
-                total_to_process = min(limit, total_issues)
-            else:
-                total_to_process = total_issues
+            total_to_process = (
+                min(limit, total_issues)
+                if (limit > 0 and total_issues)
+                else (total_issues or limit)
+            )
 
             issues_data = []
-            prs_data = []
-            
-            # Dividir o total de itens igualmente entre os tokens disponíveis
-            num_clients = len(self.clients)
-            chunk_size = max(1, total_to_process // num_clients)
-            
-            print(f"[INFO] Dividindo carga de {total_to_process} itens entre {num_clients} tokens (~{chunk_size} itens por token)...")
+            prs_data    = []
+            processed   = 0
 
-            for c_idx, client in enumerate(self.clients):
-                start_idx = c_idx * chunk_size
-                # O último cliente pega até o final
-                end_idx = total_to_process if c_idx == num_clients - 1 else (c_idx + 1) * chunk_size
-                
-                if start_idx >= total_to_process:
+            for issue in issues_query:
+                if limit > 0 and processed >= limit:
                     break
 
-                print(f"\n[INFO] Token {c_idx+1}/{num_clients} iniciando mineração da fatia [{start_idx} a {end_idx}]...")
+                processed += 1
+                pct = f"{processed}/{total_to_process}" if total_to_process else str(processed)
+                print(f"  [{pct}] Processando #{issue.number}: {issue.title[:55]}...")
 
+                # Checkpoint periódico — salva progresso independente do que acontecer
+                if processed % self.CHECKPOINT_INTERVAL == 0:
+                    self._save_checkpoint(issues_data, prs_data)
+                    remaining = self._check_rate_limit()
+                    if remaining < 50:
+                        print(f"  [WARN] Poucas requisições no token #{self._token_index + 1}. "
+                              "Rotacionando preventivamente...")
+                        self._rotate_token()
+                        self._check_rate_limit()
+
+                author        = issue.user.login       if issue.user else "ghost"
+                author_avatar = issue.user.avatar_url  if issue.user else ""
+                author_type   = issue.user.type        if issue.user else "User"
+
+                # Comentários
+                comments = []
                 try:
-                    # Mostrar rate limit inicial deste token
+                    for comment in self._call_api(lambda i=issue: i.get_comments()):
+                        comments.append({
+                            "author":       comment.user.login      if comment.user else "ghost",
+                            "author_avatar": comment.user.avatar_url if comment.user else "",
+                            "author_type":  comment.user.type       if comment.user else "User",
+                            "created_at":   comment.created_at.isoformat()
+                        })
+                except Exception as ce:
+                    print(f"    [WARN] Falha ao coletar comentários do item #{issue.number}: {ce}")
+
+                is_pull_request = issue.pull_request is not None
+
+                item_data = {
+                    "number":       issue.number,
+                    "title":        issue.title,
+                    "author":       author,
+                    "author_avatar": author_avatar,
+                    "author_type":  author_type,
+                    "created_at":   issue.created_at.isoformat(),
+                    "comments":     comments,
+                    "is_pr":        is_pull_request
+                }
+
+                if not is_pull_request:
+                    # Coletar quem fechou a issue (necessário para o Grafo 2)
+                    closed_by = None
                     try:
-                        rl = client.get_rate_limit().core
-                        print(f"  [STATUS] Token {c_idx+1} Rate Limit: {rl.remaining}/{rl.limit} (reseta em {rl.reset.astimezone()})")
-                        if rl.remaining < 10:
-                            print(f"  [WARN] Token {c_idx+1} possui poucas requisições restantes. Tentando prosseguir mesmo assim.")
+                        if issue.state == "closed":
+                            events = self._call_api(lambda i=issue: list(i.get_events()))
+                            for event in reversed(events):
+                                if event.event == "closed" and event.actor:
+                                    closed_by = event.actor.login
+                                    break
                     except Exception:
                         pass
+                    item_data["closed_by"] = closed_by
+                    issues_data.append(item_data)
 
-                    client_repo = client.get_repo(self.repo_name)
-                    client_issues = client_repo.get_issues(state="all")[start_idx:end_idx]
-
-                    for idx, issue in enumerate(client_issues):
-                        global_idx = start_idx + idx + 1
-                        print(f"  [{global_idx}/{total_to_process}] [Token {c_idx+1}] Processando #{issue.number}: {issue.title[:40]}...")
-
-                        # Monitoramento periódico de rate limit do token atual a cada 50 itens
-                        if (idx + 1) % 50 == 0:
-                            try:
-                                rl = client.get_rate_limit().core
-                                print(f"    [STATUS Token {c_idx+1}] Rate Limit Restante: {rl.remaining}/{rl.limit}")
-                                if rl.remaining < 10:
-                                    print(f"    [WARN] Token {c_idx+1} esgotado! Salvando progresso e avançando para o próximo token...")
-                                    break
-                            except Exception:
-                                pass
-
-                        # Dados básicos do autor
-                        author = issue.user.login if issue.user else "ghost"
-                        author_avatar = issue.user.avatar_url if issue.user else ""
-                        author_type = issue.user.type if issue.user else "User"
-
-                        comments = []
-                        # Coletando comentários da issue usando o cliente atual
+                else:
+                    # Detalhes do PR: revisões e merged_by (necessários para o Grafo 3)
+                    reviews   = []
+                    merged    = False
+                    merged_by = None
+                    try:
+                        pr = self._call_api(lambda i=issue: repo.get_pull(i.number))
                         try:
-                            for comment in issue.get_comments():
-                                c_author = comment.user.login if comment.user else "ghost"
-                                comments.append({
-                                    "author": c_author,
-                                    "author_avatar": comment.user.avatar_url if comment.user else "",
-                                    "author_type": comment.user.type if comment.user else "User",
-                                    "created_at": comment.created_at.isoformat()
+                            for review in self._call_api(lambda p=pr: p.get_reviews()):
+                                reviews.append({
+                                    "author":       review.user.login      if review.user else "ghost",
+                                    "author_avatar": review.user.avatar_url if review.user else "",
+                                    "author_type":  review.user.type       if review.user else "User",
+                                    "state":        review.state,
+                                    "created_at":   (review.submitted_at.isoformat()
+                                                     if review.submitted_at
+                                                     else datetime.now().isoformat())
                                 })
-                        except Exception as ce:
-                            print(f"    [WARN] Falha ao coletar comentários da issue #{issue.number}: {ce}")
+                        except Exception as re_:
+                            print(f"    [WARN] Falha ao coletar revisões do PR #{issue.number}: {re_}")
 
-                        is_pull_request = issue.pull_request is not None
+                        merged    = pr.merged
+                        merged_by = pr.merged_by.login if pr.merged_by else None
 
-                        item_data = {
-                            "number": issue.number,
-                            "title": issue.title,
-                            "author": author,
-                            "author_avatar": author_avatar,
-                            "author_type": author_type,
-                            "created_at": issue.created_at.isoformat(),
-                            "comments": comments,
-                            "is_pr": is_pull_request
-                        }
+                    except Exception as pe:
+                        print(f"    [WARN] Falha ao coletar detalhes do PR #{issue.number}: {pe}")
 
-                        if is_pull_request:
-                            # Se for PR, coletamos revisões usando o cliente atual
-                            try:
-                                pr = client_repo.get_pull(issue.number)
-                                reviews = []
-                                for review in pr.get_reviews():
-                                    r_author = review.user.login if review.user else "ghost"
-                                    reviews.append({
-                                        "author": r_author,
-                                        "author_avatar": review.user.avatar_url if review.user else "",
-                                        "author_type": review.user.type if review.user else "User",
-                                        "state": review.state,
-                                        "created_at": review.submitted_at.isoformat() if review.submitted_at else datetime.now().isoformat()
-                                    })
-                                item_data["reviews"] = reviews
-                            except Exception as e:
-                                item_data["reviews"] = []
-                            prs_data.append(item_data)
-                        else:
-                            issues_data.append(item_data)
+                    item_data["reviews"]   = reviews
+                    item_data["merged"]    = merged
+                    item_data["merged_by"] = merged_by
+                    prs_data.append(item_data)
 
-                except Exception as e:
-                    print(f"[ERROR] Falha ao processar fatia com Token {c_idx+1}: {e}")
-                    continue
-
+            # Salvamento final (marca como completo, sem is_checkpoint)
             output_data = {
                 "repository": self.repo_name,
-                "mined_at": datetime.now().isoformat(),
-                "issues": issues_data,
-                "prs": prs_data
+                "mined_at":   datetime.now().isoformat(),
+                "issues":     issues_data,
+                "prs":        prs_data
             }
-
             self.save_cache(output_data)
-            print("\n[INFO] Mineração concluída com sucesso e dados armazenados em cache.")
+            print(f"\n[INFO] Mineração concluída: {len(issues_data)} issues, {len(prs_data)} PRs.")
             return output_data
 
-        except GithubException as ge:
-            print(f"[ERROR] Erro da API do GitHub: {ge}")
-            if ge.status == 403:
-                print("[ERROR] Limite de requisições excedido (Rate Limit) ou acesso não autorizado.")
-            raise ge
         except Exception as e:
-            print(f"[ERROR] Falha inesperada durante a mineração: {e}")
-            raise e
+            # Qualquer falha inesperada — salvar checkpoint antes de propagar
+            if issues_data or prs_data:
+                print(f"[ERROR] Erro durante a mineração: {e}")
+                print(f"[INFO] Salvando checkpoint de emergência "
+                      f"({len(issues_data)} issues, {len(prs_data)} PRs coletados até agora)...")
+                self._save_checkpoint(issues_data, prs_data)
+            raise
+
+    # ── Cache ─────────────────────────────────────────────────────────────────
 
     def save_cache(self, data):
-        """Salva os dados coletados em formato JSON."""
         with open(self.cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"[INFO] Cache salvo em: {self.cache_file.name}")
 
     def load_cache(self):
-        """Lê os dados do arquivo de cache."""
         with open(self.cache_file, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    # ── Mock ──────────────────────────────────────────────────────────────────
+
     @staticmethod
     def generate_mock_data():
-        """Gera dados realistas de contribuição do FastAPI para modo offline/simulado."""
-        print("[INFO] Gerando dados sintéticos/mock realistas do repositório FastAPI...")
-        
-        # Principais contribuidores do FastAPI
+        """
+        Gera dados sintéticos realistas do makeplane/plane para modo offline.
+        Inclui closed_by em issues e merged_by/merged em PRs,
+        cobrindo todos os campos necessários para os 4 grafos.
+        """
+        import random
+        from datetime import timedelta
+        print("[INFO] Gerando dados mock do repositório makeplane/plane...")
+
         contributors = [
-            {"username": "tiangolo", "avatar": "https://avatars.githubusercontent.com/u/13275653", "type": "User"},
-            {"username": "dmontagu", "avatar": "https://avatars.githubusercontent.com/u/3511177", "type": "User"},
-            {"username": "Kludex", "avatar": "https://avatars.githubusercontent.com/u/7362854", "type": "User"},
-            {"username": "sobolevn", "avatar": "https://avatars.githubusercontent.com/u/4660274", "type": "User"},
-            {"username": "samuelcolvin", "avatar": "https://avatars.githubusercontent.com/u/232162", "type": "User"},
-            {"username": "tomchristie", "avatar": "https://avatars.githubusercontent.com/u/647385", "type": "User"},
-            {"username": "euri10", "avatar": "https://avatars.githubusercontent.com/u/1271183", "type": "User"},
-            {"username": "bueltge", "avatar": "https://avatars.githubusercontent.com/u/328220", "type": "User"},
-            {"username": "dependabot", "avatar": "https://avatars.githubusercontent.com/u/49699333", "type": "Bot"},
-            {"username": "matheus-soares", "avatar": "https://avatars.githubusercontent.com/u/123456", "type": "User"},
-            {"username": "bernardo-cdm", "avatar": "https://avatars.githubusercontent.com/u/7891011", "type": "User"},
-            {"username": "anonymous-coder", "avatar": "https://avatars.githubusercontent.com/u/000000", "type": "User"}
+            {"username": "sriramveeraghanta", "avatar": "https://avatars.githubusercontent.com/u/9484953",  "type": "User"},
+            {"username": "pablohashescobar",  "avatar": "https://avatars.githubusercontent.com/u/18600920", "type": "User"},
+            {"username": "gurusainath",        "avatar": "https://avatars.githubusercontent.com/u/67518620", "type": "User"},
+            {"username": "rahulramesha",       "avatar": "https://avatars.githubusercontent.com/u/71900764", "type": "User"},
+            {"username": "nikhil-task",        "avatar": "https://avatars.githubusercontent.com/u/98703399", "type": "User"},
+            {"username": "Prince-Shivaram",    "avatar": "https://avatars.githubusercontent.com/u/85993243", "type": "User"},
+            {"username": "ChandanTeerth",      "avatar": "https://avatars.githubusercontent.com/u/68558541", "type": "User"},
+            {"username": "KumarRoshan",        "avatar": "https://avatars.githubusercontent.com/u/14017",    "type": "User"},
+            {"username": "BifrostTitan",       "avatar": "https://avatars.githubusercontent.com/u/23018",   "type": "User"},
+            {"username": "plane-bot",          "avatar": "https://avatars.githubusercontent.com/u/49699333", "type": "Bot"},
+            {"username": "dependabot",         "avatar": "https://avatars.githubusercontent.com/u/27347476", "type": "Bot"},
         ]
-        
-        issues = []
-        prs = []
-        base_date = datetime.now() - timedelta(days=90)
-        
-        # Gerar 40 itens simulados
-        for i in range(1001, 1041):
-            is_pr = random.choice([True, False])
-            author = random.choice(contributors)
-            
-            # Não deixar dependabot criar issues, apenas PRs
-            if not is_pr and author["username"] == "dependabot":
-                author = random.choice([c for c in contributors if c["type"] == "User"])
-                
-            title = f"Fix bug in dependency injection" if is_pr else f"Error when parsing query parameters"
-            if is_pr and author["username"] == "dependabot":
-                title = "Bump pydantic from 2.5.2 to 2.6.0"
-                
-            created_at = base_date + timedelta(days=random.randint(1, 80), hours=random.randint(0, 23))
-            
-            # Gerar comentários de outros contribuidores
-            comments = []
-            num_comments = random.randint(0, 6)
-            commenters = random.sample([c for c in contributors if c != author], min(num_comments, len(contributors)-1))
-            
-            for commenter in commenters:
-                comments.append({
-                    "author": commenter["username"],
-                    "author_avatar": commenter["avatar"],
-                    "author_type": commenter["type"],
-                    "created_at": (created_at + timedelta(hours=random.randint(1, 48))).isoformat()
-                })
-                
+
+        human_contributors = [c for c in contributors if c["type"] == "User"]
+        core_reviewers = [c for c in human_contributors
+                          if c["username"] in ("sriramveeraghanta", "pablohashescobar", "gurusainath")]
+
+        issues_data = []
+        prs_data    = []
+        base_date   = datetime.now() - timedelta(days=90)
+
+        for i in range(1001, 1061):
+            is_pr  = random.choice([True, False])
+            author = random.choice(human_contributors)
+            created_at = base_date + timedelta(days=random.randint(1, 85),
+                                               hours=random.randint(0, 23))
+
+            possible_commenters = [c for c in human_contributors if c != author]
+            commenters = random.sample(possible_commenters,
+                                       min(random.randint(0, 5), len(possible_commenters)))
+            comments = [{
+                "author":       c["username"],
+                "author_avatar": c["avatar"],
+                "author_type":  c["type"],
+                "created_at":   (created_at + timedelta(hours=random.randint(1, 72))).isoformat()
+            } for c in commenters]
+
             item_data = {
-                "number": i,
-                "title": f"{title} #{i}",
-                "author": author["username"],
+                "number":       i,
+                "title":        (
+                    f"Fix: {random.choice(['state management','drag-and-drop','API pagination','auth flow'])} #{i}"
+                    if is_pr else
+                    f"Bug: {random.choice(['workspace crash','issue not saving','filter broken','slow load'])} #{i}"
+                ),
+                "author":       author["username"],
                 "author_avatar": author["avatar"],
-                "author_type": author["type"],
-                "created_at": created_at.isoformat(),
-                "comments": comments,
-                "is_pr": is_pr
+                "author_type":  author["type"],
+                "created_at":   created_at.isoformat(),
+                "comments":     comments,
+                "is_pr":        is_pr
             }
-            
-            if is_pr:
-                # Se for PR, gerar revisões
-                reviews = []
-                # dmontagu, Kludex e tiangolo costumam revisar muito
-                reviewers = [c for c in contributors if c["username"] in ["tiangolo", "dmontagu", "Kludex"] and c != author]
-                num_reviews = random.randint(0, len(reviewers))
-                chosen_reviewers = random.sample(reviewers, num_reviews)
-                
-                for reviewer in chosen_reviewers:
-                    reviews.append({
-                        "author": reviewer["username"],
-                        "author_avatar": reviewer["avatar"],
-                        "author_type": reviewer["type"],
-                        "state": random.choice(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]),
-                        "created_at": (created_at + timedelta(hours=random.randint(2, 24))).isoformat()
-                    })
-                item_data["reviews"] = reviews
-                prs.append(item_data)
+
+            if not is_pr:
+                closer = None
+                if random.random() > 0.3:
+                    closer = random.choice([c for c in human_contributors if c != author])
+                item_data["closed_by"] = closer["username"] if closer else None
+                issues_data.append(item_data)
             else:
-                issues.append(item_data)
-                
+                possible_reviewers = [c for c in core_reviewers if c != author]
+                chosen = random.sample(possible_reviewers,
+                                       min(random.randint(0, len(possible_reviewers)),
+                                           len(possible_reviewers)))
+                reviews = [{
+                    "author":       r["username"],
+                    "author_avatar": r["avatar"],
+                    "author_type":  r["type"],
+                    "state":        random.choice(["APPROVED", "CHANGES_REQUESTED", "COMMENTED"]),
+                    "created_at":   (created_at + timedelta(hours=random.randint(2, 48))).isoformat()
+                } for r in chosen]
+
+                merged = random.random() > 0.25
+                merger = None
+                if merged:
+                    possible_mergers = [c for c in core_reviewers if c != author]
+                    if possible_mergers:
+                        merger = random.choice(possible_mergers)["username"]
+
+                item_data["reviews"]   = reviews
+                item_data["merged"]    = merged
+                item_data["merged_by"] = merger
+                prs_data.append(item_data)
+
         return {
             "repository": DEFAULT_REPO,
-            "mined_at": datetime.now().isoformat(),
-            "issues": issues,
-            "prs": prs,
-            "is_mock": True
+            "mined_at":   datetime.now().isoformat(),
+            "issues":     issues_data,
+            "prs":        prs_data,
+            "is_mock":    True
         }
